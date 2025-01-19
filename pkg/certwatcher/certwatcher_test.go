@@ -34,6 +34,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher/metrics"
 )
@@ -75,12 +76,12 @@ var _ = Describe("CertWatcher", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		startWatcher := func() (done <-chan struct{}) {
+		startWatcher := func(interval time.Duration) (done <-chan struct{}) {
 			doneCh := make(chan struct{})
 			go func() {
 				defer GinkgoRecover()
 				defer close(doneCh)
-				Expect(watcher.Start(ctx)).To(Succeed())
+				Expect(watcher.WithWatchInterval(interval).Start(ctx)).To(Succeed())
 			}()
 			// wait till we read first cert
 			Eventually(func() error {
@@ -91,14 +92,16 @@ var _ = Describe("CertWatcher", func() {
 		}
 
 		It("should read the initial cert/key", func() {
-			doneCh := startWatcher()
+			// This test verifies the initial read succeeded. So interval doesn't matter.
+			doneCh := startWatcher(10 * time.Second)
 
 			ctxCancel()
 			Eventually(doneCh, "4s").Should(BeClosed())
 		})
 
 		It("should reload currentCert when changed", func() {
-			doneCh := startWatcher()
+			// This test verifies fsnotify detects the cert change. So interval doesn't matter.
+			doneCh := startWatcher(10 * time.Second)
 			called := atomic.Int64{}
 			watcher.RegisterCallback(func(crt tls.Certificate) {
 				called.Add(1)
@@ -113,8 +116,67 @@ var _ = Describe("CertWatcher", func() {
 			Eventually(func() bool {
 				secondcert, _ := watcher.GetCertificate(nil)
 				first := firstcert.PrivateKey.(*rsa.PrivateKey)
-				return first.Equal(secondcert.PrivateKey)
+				return first.Equal(secondcert.PrivateKey) || firstcert.Leaf.SerialNumber == secondcert.Leaf.SerialNumber
 			}).ShouldNot(BeTrue())
+
+			ctxCancel()
+			Eventually(doneCh, "4s").Should(BeClosed())
+			Expect(called.Load()).To(BeNumerically(">=", 1))
+		})
+
+		It("should reload currentCert when changed with rename", func() {
+			// This test verifies fsnotify detects the cert change. So interval doesn't matter.
+			doneCh := startWatcher(10 * time.Second)
+			called := atomic.Int64{}
+			watcher.RegisterCallback(func(crt tls.Certificate) {
+				called.Add(1)
+				Expect(crt.Certificate).ToNot(BeEmpty())
+			})
+
+			firstcert, _ := watcher.GetCertificate(nil)
+
+			err := writeCerts(certPath+".new", keyPath+".new", "192.168.0.2")
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(os.Link(certPath, certPath+".old")).To(Succeed())
+			Expect(os.Rename(certPath+".new", certPath)).To(Succeed())
+
+			Expect(os.Link(keyPath, keyPath+".old")).To(Succeed())
+			Expect(os.Rename(keyPath+".new", keyPath)).To(Succeed())
+
+			Eventually(func() bool {
+				secondcert, _ := watcher.GetCertificate(nil)
+				first := firstcert.PrivateKey.(*rsa.PrivateKey)
+				return first.Equal(secondcert.PrivateKey) || firstcert.Leaf.SerialNumber == secondcert.Leaf.SerialNumber
+			}).ShouldNot(BeTrue())
+
+			ctxCancel()
+			Eventually(doneCh, "4s").Should(BeClosed())
+			Expect(called.Load()).To(BeNumerically(">=", 1))
+		})
+
+		It("should reload currentCert after move out", func() {
+			// This test verifies poll works, so we'll use 1s as interval (fsnotify doesn't detect this change).
+			doneCh := startWatcher(1 * time.Second)
+			called := atomic.Int64{}
+			watcher.RegisterCallback(func(crt tls.Certificate) {
+				called.Add(1)
+				Expect(crt.Certificate).ToNot(BeEmpty())
+			})
+
+			firstcert, _ := watcher.GetCertificate(nil)
+
+			Expect(os.Rename(certPath, certPath+".old")).To(Succeed())
+			Expect(os.Rename(keyPath, keyPath+".old")).To(Succeed())
+
+			err := writeCerts(certPath, keyPath, "192.168.0.3")
+			Expect(err).ToNot(HaveOccurred())
+
+			Eventually(func() bool {
+				secondcert, _ := watcher.GetCertificate(nil)
+				first := firstcert.PrivateKey.(*rsa.PrivateKey)
+				return first.Equal(secondcert.PrivateKey) || firstcert.Leaf.SerialNumber == secondcert.Leaf.SerialNumber
+			}, "10s", "1s").ShouldNot(BeTrue())
 
 			ctxCancel()
 			Eventually(doneCh, "4s").Should(BeClosed())
@@ -131,12 +193,13 @@ var _ = Describe("CertWatcher", func() {
 			})
 
 			It("should get updated on successful certificate read", func() {
-				doneCh := startWatcher()
+				// This test verifies fsnotify, so interval doesn't matter.
+				doneCh := startWatcher(10 * time.Second)
 
 				Eventually(func() error {
 					readCertificateTotalAfter := testutil.ToFloat64(metrics.ReadCertificateTotal)
-					if readCertificateTotalAfter != readCertificateTotalBefore+1.0 {
-						return fmt.Errorf("metric read certificate total expected: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
+					if readCertificateTotalAfter < readCertificateTotalBefore+1.0 {
+						return fmt.Errorf("metric read certificate total expected at least: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
 					}
 					return nil
 				}, "4s").Should(Succeed())
@@ -146,12 +209,13 @@ var _ = Describe("CertWatcher", func() {
 			})
 
 			It("should get updated on read certificate errors", func() {
-				doneCh := startWatcher()
+				// This test works with fsnotify, so interval doesn't matter.
+				doneCh := startWatcher(10 * time.Second)
 
 				Eventually(func() error {
 					readCertificateTotalAfter := testutil.ToFloat64(metrics.ReadCertificateTotal)
-					if readCertificateTotalAfter != readCertificateTotalBefore+1.0 {
-						return fmt.Errorf("metric read certificate total expected: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
+					if readCertificateTotalAfter < readCertificateTotalBefore+1.0 {
+						return fmt.Errorf("metric read certificate total expected at least: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
 					}
 					readCertificateTotalBefore = readCertificateTotalAfter
 					return nil
@@ -159,17 +223,18 @@ var _ = Describe("CertWatcher", func() {
 
 				Expect(os.Remove(keyPath)).To(Succeed())
 
+				// Note, we are checking two errors here, because os.Remove generates two fsnotify events: Chmod + Remove
 				Eventually(func() error {
 					readCertificateTotalAfter := testutil.ToFloat64(metrics.ReadCertificateTotal)
-					if readCertificateTotalAfter != readCertificateTotalBefore+1.0 {
-						return fmt.Errorf("metric read certificate total expected: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
+					if readCertificateTotalAfter < readCertificateTotalBefore+2.0 {
+						return fmt.Errorf("metric read certificate total expected at least: %v and got: %v", readCertificateTotalBefore+2.0, readCertificateTotalAfter)
 					}
 					return nil
 				}, "4s").Should(Succeed())
 				Eventually(func() error {
 					readCertificateErrorsAfter := testutil.ToFloat64(metrics.ReadCertificateErrors)
-					if readCertificateErrorsAfter != readCertificateErrorsBefore+1.0 {
-						return fmt.Errorf("metric read certificate errors expected: %v and got: %v", readCertificateErrorsBefore+1.0, readCertificateErrorsAfter)
+					if readCertificateErrorsAfter < readCertificateErrorsBefore+2.0 {
+						return fmt.Errorf("metric read certificate errors expected at least: %v and got: %v", readCertificateErrorsBefore+2.0, readCertificateErrorsAfter)
 					}
 					return nil
 				}, "4s").Should(Succeed())

@@ -34,6 +34,13 @@ import (
 var authenticationScheme = runtime.NewScheme()
 var authenticationCodecs = serializer.NewCodecFactory(authenticationScheme)
 
+// The TokenReview resource mostly contains a bearer token which
+// at most should have a few KB's of size, so we picked 1 MB to
+// have plenty of buffer.
+// If your use case requires larger max request sizes, please
+// open an issue (https://github.com/kubernetes-sigs/controller-runtime/issues/new).
+const maxRequestSize = int64(1 * 1024 * 1024)
+
 func init() {
 	utilruntime.Must(authenticationv1.AddToScheme(authenticationScheme))
 	utilruntime.Must(authenticationv1beta1.AddToScheme(authenticationScheme))
@@ -42,36 +49,38 @@ func init() {
 var _ http.Handler = &Webhook{}
 
 func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var body []byte
-	var err error
 	ctx := r.Context()
 	if wh.WithContextFunc != nil {
 		ctx = wh.WithContextFunc(ctx, r)
 	}
 
-	var reviewResponse Response
-	if r.Body == nil {
-		err = errors.New("request body is empty")
+	if r.Body == nil || r.Body == http.NoBody {
+		err := errors.New("request body is empty")
 		wh.getLogger(nil).Error(err, "bad request")
-		reviewResponse = Errored(err)
-		wh.writeResponse(w, reviewResponse)
+		wh.writeResponse(w, Errored(err))
 		return
 	}
 
 	defer r.Body.Close()
-	if body, err = io.ReadAll(r.Body); err != nil {
+	limitedReader := &io.LimitedReader{R: r.Body, N: maxRequestSize}
+	body, err := io.ReadAll(limitedReader)
+	if err != nil {
 		wh.getLogger(nil).Error(err, "unable to read the body from the incoming request")
-		reviewResponse = Errored(err)
-		wh.writeResponse(w, reviewResponse)
+		wh.writeResponse(w, Errored(err))
+		return
+	}
+	if limitedReader.N <= 0 {
+		err := fmt.Errorf("request entity is too large; limit is %d bytes", maxRequestSize)
+		wh.getLogger(nil).Error(err, "unable to read the body from the incoming request; limit reached")
+		wh.writeResponse(w, Errored(err))
 		return
 	}
 
 	// verify the content type is accurate
 	if contentType := r.Header.Get("Content-Type"); contentType != "application/json" {
-		err = fmt.Errorf("contentType=%s, expected application/json", contentType)
+		err := fmt.Errorf("contentType=%s, expected application/json", contentType)
 		wh.getLogger(nil).Error(err, "unable to process a request with unknown content type")
-		reviewResponse = Errored(err)
-		wh.writeResponse(w, reviewResponse)
+		wh.writeResponse(w, Errored(err))
 		return
 	}
 
@@ -90,22 +99,19 @@ func (wh *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, actualTokRevGVK, err := authenticationCodecs.UniversalDeserializer().Decode(body, nil, &ar)
 	if err != nil {
 		wh.getLogger(nil).Error(err, "unable to decode the request")
-		reviewResponse = Errored(err)
-		wh.writeResponse(w, reviewResponse)
+		wh.writeResponse(w, Errored(err))
 		return
 	}
 	wh.getLogger(&req).V(5).Info("received request")
 
 	if req.Spec.Token == "" {
-		err = errors.New("token is empty")
+		err := errors.New("token is empty")
 		wh.getLogger(&req).Error(err, "bad request")
-		reviewResponse = Errored(err)
-		wh.writeResponse(w, reviewResponse)
+		wh.writeResponse(w, Errored(err))
 		return
 	}
 
-	reviewResponse = wh.Handle(ctx, req)
-	wh.writeResponseTyped(w, reviewResponse, actualTokRevGVK)
+	wh.writeResponseTyped(w, wh.Handle(ctx, req), actualTokRevGVK)
 }
 
 // writeResponse writes response to w generically, i.e. without encoding GVK information.

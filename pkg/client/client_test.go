@@ -17,11 +17,14 @@ limitations under the License.
 package client_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -41,7 +44,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/pointer"
+	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/controller-runtime/examples/crd/pkg"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -226,6 +230,65 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 		Expect(client.IgnoreNotFound(err)).NotTo(HaveOccurred())
 	})
 
+	Describe("WarningHandler", func() {
+		It("should log warnings with config.WarningHandler, if one is defined", func() {
+			cache := &fakeReader{}
+
+			testCfg := rest.CopyConfig(cfg)
+
+			var testLog bytes.Buffer
+			testCfg.WarningHandler = rest.NewWarningWriter(&testLog, rest.WarningWriterOptions{})
+
+			cl, err := client.New(testCfg, client.Options{Cache: &client.CacheOptions{Reader: cache, DisableFor: []client.Object{&corev1.Namespace{}}}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cl).NotTo(BeNil())
+
+			tns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "wh-defined"}}
+			tns, err = clientset.CoreV1().Namespaces().Create(ctx, tns, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tns).NotTo(BeNil())
+			defer deleteNamespace(ctx, tns)
+
+			toCreate := &pkg.ChaosPod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "example",
+					Namespace: tns.Name,
+				},
+				// The ChaosPod CRD does not define Status, so the field is unknown to the API server,
+				// but field validation is not strict by default, so the API server returns a warning,
+				// and we need a warning to check whether suppression works.
+				Status: pkg.ChaosPodStatus{},
+			}
+			err = cl.Create(ctx, toCreate)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cl).NotTo(BeNil())
+
+			scannerTestLog := bufio.NewScanner(&testLog)
+			for scannerTestLog.Scan() {
+				line := scannerTestLog.Text()
+				if strings.Contains(
+					line,
+					"unknown field \"status\"",
+				) {
+					return
+				}
+			}
+			defer Fail("expected to find one API server warning logged the config.WarningHandler")
+
+			scanner := bufio.NewScanner(&log)
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.Contains(
+					line,
+					"unknown field \"status\"",
+				) {
+					defer Fail("expected to find zero API server warnings in the client log")
+					break
+				}
+			}
+		})
+	})
+
 	Describe("New", func() {
 		It("should return a new Client", func() {
 			cl, err := client.New(cfg, client.Options{})
@@ -391,7 +454,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 
 			Context("with the DryRun option", func() {
 				It("should not create a new object, global option", func() {
-					cl, err := client.New(cfg, client.Options{DryRun: pointer.Bool(true)})
+					cl, err := client.New(cfg, client.Options{DryRun: ptr.To(true)})
 					Expect(err).NotTo(HaveOccurred())
 					Expect(cl).NotTo(BeNil())
 
@@ -809,7 +872,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 
 				By("reading the scale subresource")
 				scale := &autoscalingv1.Scale{}
-				err = cl.SubResource("scale").Get(ctx, dep, scale)
+				err = cl.SubResource("scale").Get(ctx, dep, scale, &client.SubResourceGetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(scale.Spec.Replicas).To(Equal(*dep.Spec.Replicas))
 			})
@@ -823,7 +886,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 				Expect((err)).NotTo(HaveOccurred())
 
 				token := &authenticationv1.TokenRequest{}
-				err = cl.SubResource("token").Create(ctx, serviceAccount, token)
+				err = cl.SubResource("token").Create(ctx, serviceAccount, token, &client.SubResourceCreateOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				Expect(token.Status.Token).NotTo(Equal(""))
@@ -843,9 +906,9 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 
 				By("Creating the eviction")
 				eviction := &policyv1.Eviction{
-					DeleteOptions: &metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))},
+					DeleteOptions: &metav1.DeleteOptions{GracePeriodSeconds: ptr.To(int64(0))},
 				}
-				err = cl.SubResource("eviction").Create(ctx, pod, eviction)
+				err = cl.SubResource("eviction").Create(ctx, pod, eviction, &client.SubResourceCreateOptions{})
 				Expect((err)).NotTo(HaveOccurred())
 
 				By("Asserting the pod is gone")
@@ -869,7 +932,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 				binding := &corev1.Binding{
 					Target: corev1.ObjectReference{Name: node.Name},
 				}
-				err = cl.SubResource("binding").Create(ctx, pod, binding)
+				err = cl.SubResource("binding").Create(ctx, pod, binding, &client.SubResourceCreateOptions{})
 				Expect((err)).NotTo(HaveOccurred())
 
 				By("Asserting the pod is bound")
@@ -892,7 +955,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 					Type:   certificatesv1.CertificateApproved,
 					Status: corev1.ConditionTrue,
 				})
-				err = cl.SubResource("approval").Update(ctx, csr)
+				err = cl.SubResource("approval").Update(ctx, csr, &client.SubResourceUpdateOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				By("Asserting the CSR is approved")
@@ -917,7 +980,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 					Type:   certificatesv1.CertificateApproved,
 					Status: corev1.ConditionTrue,
 				})
-				err = cl.SubResource("approval").Patch(ctx, csr, patch)
+				err = cl.SubResource("approval").Patch(ctx, csr, patch, &client.SubResourcePatchOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				By("Asserting the CSR is approved")
@@ -936,10 +999,10 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 				dep, err := clientset.AppsV1().Deployments(dep.Namespace).Create(ctx, dep, metav1.CreateOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
-				By("Updating the scale subresurce")
+				By("Updating the scale subresource")
 				replicaCount := *dep.Spec.Replicas
 				scale := &autoscalingv1.Scale{Spec: autoscalingv1.ScaleSpec{Replicas: replicaCount}}
-				err = cl.SubResource("scale").Update(ctx, dep, client.WithSubResourceBody(scale))
+				err = cl.SubResource("scale").Update(ctx, dep, client.WithSubResourceBody(scale), &client.SubResourceUpdateOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				By("Asserting replicas got updated")
@@ -961,7 +1024,7 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 				replicaCount := *dep.Spec.Replicas
 				patch := client.MergeFrom(&autoscalingv1.Scale{})
 				scale := &autoscalingv1.Scale{Spec: autoscalingv1.ScaleSpec{Replicas: replicaCount}}
-				err = cl.SubResource("scale").Patch(ctx, dep, patch, client.WithSubResourceBody(scale))
+				err = cl.SubResource("scale").Patch(ctx, dep, patch, client.WithSubResourceBody(scale), &client.SubResourcePatchOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
 				By("Asserting replicas got updated")
@@ -1916,7 +1979,6 @@ U5wwSivyi7vmegHKmblOzNVKA5qPO8zWzqBC
 			// Test this with an integrated type and a CRD to make sure it covers both proto
 			// and json deserialization.
 			for idx, object := range []client.Object{&corev1.ConfigMap{}, &pkg.ChaosPod{}} {
-				idx, object := idx, object
 				It(fmt.Sprintf("should not retain any data in the obj variable that is not on the server for %T", object), func() {
 					cl, err := client.New(cfg, client.Options{})
 					Expect(err).NotTo(HaveOccurred())
@@ -3963,10 +4025,6 @@ func (f *fakeUncachedReader) Get(_ context.Context, _ client.ObjectKey, _ client
 func (f *fakeUncachedReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
 	f.Called++
 	return &cache.ErrResourceNotCached{}
-}
-
-func ptr[T any](to T) *T {
-	return &to
 }
 
 func toUnstructured(o client.Object) (*unstructured.Unstructured, error) {

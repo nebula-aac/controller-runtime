@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	fuzz "github.com/google/gofuzz"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -30,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -38,6 +39,22 @@ func TestDefaultOpts(t *testing.T) {
 	t.Parallel()
 
 	pod := &corev1.Pod{}
+
+	compare := func(a, b any) string {
+		return cmp.Diff(a, b,
+			cmpopts.IgnoreUnexported(Options{}),
+			cmpopts.IgnoreFields(Options{}, "HTTPClient", "Scheme", "Mapper", "SyncPeriod"),
+			cmp.Comparer(func(a, b fields.Selector) bool {
+				if (a != nil) != (b != nil) {
+					return false
+				}
+				if a == nil {
+					return true
+				}
+				return a.String() == b.String()
+			}),
+		)
+	}
 	testCases := []struct {
 		name string
 		in   Options
@@ -187,24 +204,48 @@ func TestDefaultOpts(t *testing.T) {
 			name: "ByObject.UnsafeDisableDeepCopy gets defaulted from DefaultUnsafeDisableDeepCopy",
 			in: Options{
 				ByObject:                     map[client.Object]ByObject{pod: {}},
-				DefaultUnsafeDisableDeepCopy: pointer.Bool(true),
+				DefaultUnsafeDisableDeepCopy: ptr.To(true),
 			},
 
 			verification: func(o Options) string {
-				expected := pointer.Bool(true)
+				expected := ptr.To(true)
 				return cmp.Diff(expected, o.ByObject[pod].UnsafeDisableDeepCopy)
 			},
 		},
 		{
 			name: "ByObject.UnsafeDisableDeepCopy doesn't get defaulted when set",
 			in: Options{
-				ByObject:                     map[client.Object]ByObject{pod: {UnsafeDisableDeepCopy: pointer.Bool(false)}},
-				DefaultUnsafeDisableDeepCopy: pointer.Bool(true),
+				ByObject:                     map[client.Object]ByObject{pod: {UnsafeDisableDeepCopy: ptr.To(false)}},
+				DefaultUnsafeDisableDeepCopy: ptr.To(true),
 			},
 
 			verification: func(o Options) string {
-				expected := pointer.Bool(false)
+				expected := ptr.To(false)
 				return cmp.Diff(expected, o.ByObject[pod].UnsafeDisableDeepCopy)
+			},
+		},
+		{
+			name: "ByObject.EnableWatchBookmarks gets defaulted from DefaultEnableWatchBookmarks",
+			in: Options{
+				ByObject:                    map[client.Object]ByObject{pod: {}},
+				DefaultEnableWatchBookmarks: ptr.To(true),
+			},
+
+			verification: func(o Options) string {
+				expected := ptr.To(true)
+				return cmp.Diff(expected, o.ByObject[pod].EnableWatchBookmarks)
+			},
+		},
+		{
+			name: "ByObject.EnableWatchBookmarks doesn't get defaulted when set",
+			in: Options{
+				ByObject:                    map[client.Object]ByObject{pod: {EnableWatchBookmarks: ptr.To(false)}},
+				DefaultEnableWatchBookmarks: ptr.To(true),
+			},
+
+			verification: func(o Options) string {
+				expected := ptr.To(false)
+				return cmp.Diff(expected, o.ByObject[pod].EnableWatchBookmarks)
 			},
 		},
 		{
@@ -222,6 +263,120 @@ func TestDefaultOpts(t *testing.T) {
 			},
 		},
 		{
+			name: "ByObject.Namespaces get selector from DefaultNamespaces before DefaultSelector",
+			in: Options{
+				ByObject: map[client.Object]ByObject{
+					pod: {Namespaces: map[string]Config{"default": {}}},
+				},
+				DefaultNamespaces:    map[string]Config{"default": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "namespace"})}},
+				DefaultLabelSelector: labels.SelectorFromSet(map[string]string{"from": "default"}),
+			},
+
+			verification: func(o Options) string {
+				expected := Options{
+					ByObject: map[client.Object]ByObject{
+						pod: {Namespaces: map[string]Config{"default": {
+							LabelSelector: labels.SelectorFromSet(map[string]string{"from": "namespace"}),
+						}}},
+					},
+					DefaultNamespaces:    map[string]Config{"default": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "namespace"})}},
+					DefaultLabelSelector: labels.SelectorFromSet(map[string]string{"from": "default"}),
+				}
+
+				return compare(expected, o)
+			},
+		},
+		{
+			name: "Two namespaces in DefaultNamespaces with custom selection logic",
+			in: Options{DefaultNamespaces: map[string]Config{
+				"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+				"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+				"":            {},
+			}},
+
+			verification: func(o Options) string {
+				expected := Options{
+					DefaultNamespaces: map[string]Config{
+						"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+						"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+						"":            {FieldSelector: fields.ParseSelectorOrDie("metadata.namespace!=kube-public,metadata.namespace!=kube-system")},
+					},
+				}
+
+				return compare(expected, o)
+			},
+		},
+		{
+			name: "Two namespaces in DefaultNamespaces with custom selection logic and namespace default has its own field selector",
+			in: Options{DefaultNamespaces: map[string]Config{
+				"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+				"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+				"":            {FieldSelector: fields.ParseSelectorOrDie("spec.nodeName=foo")},
+			}},
+
+			verification: func(o Options) string {
+				expected := Options{
+					DefaultNamespaces: map[string]Config{
+						"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+						"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+						"": {FieldSelector: fields.ParseSelectorOrDie(
+							"metadata.namespace!=kube-public,metadata.namespace!=kube-system,spec.nodeName=foo",
+						)},
+					},
+				}
+
+				return compare(expected, o)
+			},
+		},
+		{
+			name: "Two namespaces in ByObject.Namespaces with custom selection logic",
+			in: Options{ByObject: map[client.Object]ByObject{pod: {
+				Namespaces: map[string]Config{
+					"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+					"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+					"":            {},
+				},
+			}}},
+
+			verification: func(o Options) string {
+				expected := Options{ByObject: map[client.Object]ByObject{pod: {
+					Namespaces: map[string]Config{
+						"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+						"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+						"": {FieldSelector: fields.ParseSelectorOrDie(
+							"metadata.namespace!=kube-public,metadata.namespace!=kube-system",
+						)},
+					},
+				}}}
+
+				return compare(expected, o)
+			},
+		},
+		{
+			name: "Two namespaces in ByObject.Namespaces with custom selection logic and namespace default has its own field selector",
+			in: Options{ByObject: map[client.Object]ByObject{pod: {
+				Namespaces: map[string]Config{
+					"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+					"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+					"":            {FieldSelector: fields.ParseSelectorOrDie("spec.nodeName=foo")},
+				},
+			}}},
+
+			verification: func(o Options) string {
+				expected := Options{ByObject: map[client.Object]ByObject{pod: {
+					Namespaces: map[string]Config{
+						"kube-public": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-public"})},
+						"kube-system": {LabelSelector: labels.SelectorFromSet(map[string]string{"from": "kube-system"})},
+						"": {FieldSelector: fields.ParseSelectorOrDie(
+							"metadata.namespace!=kube-public,metadata.namespace!=kube-system,spec.nodeName=foo",
+						)},
+					},
+				}}}
+
+				return compare(expected, o)
+			},
+		},
+		{
 			name: "DefaultNamespace label selector doesn't get defaulted when set",
 			in: Options{
 				DefaultNamespaces:    map[string]Config{"default": {LabelSelector: labels.Everything()}},
@@ -233,6 +388,30 @@ func TestDefaultOpts(t *testing.T) {
 					"default": {LabelSelector: labels.Everything()},
 				}
 				return cmp.Diff(expected, o.DefaultNamespaces)
+			},
+		},
+		{
+			name: "Defaulted namespaces in ByObject contain ByObject's selector",
+			in: Options{
+				ByObject: map[client.Object]ByObject{
+					pod: {Label: labels.SelectorFromSet(map[string]string{"from": "pod"})},
+				},
+				DefaultNamespaces: map[string]Config{"default": {}},
+			},
+			verification: func(o Options) string {
+				expected := Options{
+					ByObject: map[client.Object]ByObject{
+						pod: {
+							Label: labels.SelectorFromSet(map[string]string{"from": "pod"}),
+							Namespaces: map[string]Config{"default": {
+								LabelSelector: labels.SelectorFromSet(map[string]string{"from": "pod"}),
+							}},
+						},
+					},
+
+					DefaultNamespaces: map[string]Config{"default": {}},
+				}
+				return compare(expected, o)
 			},
 		},
 	}

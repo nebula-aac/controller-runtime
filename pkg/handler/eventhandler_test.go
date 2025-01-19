@@ -30,10 +30,11 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllertest"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -41,12 +42,12 @@ import (
 
 var _ = Describe("Eventhandler", func() {
 	var ctx = context.Background()
-	var q workqueue.RateLimitingInterface
+	var q workqueue.TypedRateLimitingInterface[reconcile.Request]
 	var instance handler.EnqueueRequestForObject
 	var pod *corev1.Pod
 	var mapper meta.RESTMapper
 	BeforeEach(func() {
-		q = &controllertest.Queue{Interface: workqueue.New()}
+		q = &controllertest.Queue{TypedInterface: workqueue.NewTyped[reconcile.Request]()}
 		pod = &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "biz", Name: "baz"},
 		}
@@ -54,7 +55,7 @@ var _ = Describe("Eventhandler", func() {
 
 		httpClient, err := rest.HTTPClientFor(cfg)
 		Expect(err).ShouldNot(HaveOccurred())
-		mapper, err = apiutil.NewDiscoveryRESTMapper(cfg, httpClient)
+		mapper, err = apiutil.NewDynamicRESTMapper(cfg, httpClient)
 		Expect(err).ShouldNot(HaveOccurred())
 	})
 
@@ -66,10 +67,7 @@ var _ = Describe("Eventhandler", func() {
 			instance.Create(ctx, evt, q)
 			Expect(q.Len()).To(Equal(1))
 
-			i, _ := q.Get()
-			Expect(i).NotTo(BeNil())
-			req, ok := i.(reconcile.Request)
-			Expect(ok).To(BeTrue())
+			req, _ := q.Get()
 			Expect(req.NamespacedName).To(Equal(types.NamespacedName{Namespace: "biz", Name: "baz"}))
 		})
 
@@ -80,10 +78,7 @@ var _ = Describe("Eventhandler", func() {
 			instance.Delete(ctx, evt, q)
 			Expect(q.Len()).To(Equal(1))
 
-			i, _ := q.Get()
-			Expect(i).NotTo(BeNil())
-			req, ok := i.(reconcile.Request)
-			Expect(ok).To(BeTrue())
+			req, _ := q.Get()
 			Expect(req.NamespacedName).To(Equal(types.NamespacedName{Namespace: "biz", Name: "baz"}))
 		})
 
@@ -100,10 +95,7 @@ var _ = Describe("Eventhandler", func() {
 				instance.Update(ctx, evt, q)
 				Expect(q.Len()).To(Equal(1))
 
-				i, _ := q.Get()
-				Expect(i).NotTo(BeNil())
-				req, ok := i.(reconcile.Request)
-				Expect(ok).To(BeTrue())
+				req, _ := q.Get()
 				Expect(req.NamespacedName).To(Equal(types.NamespacedName{Namespace: "biz2", Name: "baz2"}))
 			})
 
@@ -113,10 +105,7 @@ var _ = Describe("Eventhandler", func() {
 			}
 			instance.Generic(ctx, evt, q)
 			Expect(q.Len()).To(Equal(1))
-			i, _ := q.Get()
-			Expect(i).NotTo(BeNil())
-			req, ok := i.(reconcile.Request)
-			Expect(ok).To(BeTrue())
+			req, _ := q.Get()
 			Expect(req.NamespacedName).To(Equal(types.NamespacedName{Namespace: "biz", Name: "baz"}))
 		})
 
@@ -140,20 +129,14 @@ var _ = Describe("Eventhandler", func() {
 				}
 				instance.Update(ctx, evt, q)
 				Expect(q.Len()).To(Equal(1))
-				i, _ := q.Get()
-				Expect(i).NotTo(BeNil())
-				req, ok := i.(reconcile.Request)
-				Expect(ok).To(BeTrue())
+				req, _ := q.Get()
 				Expect(req.NamespacedName).To(Equal(types.NamespacedName{Namespace: "biz2", Name: "baz2"}))
 
 				evt.ObjectNew = nil
 				evt.ObjectOld = pod
 				instance.Update(ctx, evt, q)
 				Expect(q.Len()).To(Equal(1))
-				i, _ = q.Get()
-				Expect(i).NotTo(BeNil())
-				req, ok = i.(reconcile.Request)
-				Expect(ok).To(BeTrue())
+				req, _ = q.Get()
 				Expect(req.NamespacedName).To(Equal(types.NamespacedName{Namespace: "biz", Name: "baz"}))
 			})
 
@@ -467,7 +450,7 @@ var _ = Describe("Eventhandler", func() {
 				{
 					Name:       "foo-parent",
 					Kind:       "HorizontalPodAutoscaler",
-					APIVersion: "autoscaling/v2beta1",
+					APIVersion: "autoscaling/v2",
 				},
 			}
 			evt := event.CreateEvent{
@@ -525,7 +508,7 @@ var _ = Describe("Eventhandler", func() {
 						Name:       "foo2-parent",
 						Kind:       "ReplicaSet",
 						APIVersion: "apps/v1",
-						Controller: pointer.Bool(true),
+						Controller: ptr.To(true),
 					},
 					{
 						Name:       "foo3-parent",
@@ -536,7 +519,7 @@ var _ = Describe("Eventhandler", func() {
 						Name:       "foo4-parent",
 						Kind:       "ReplicaSet",
 						APIVersion: "apps/v1",
-						Controller: pointer.Bool(true),
+						Controller: ptr.To(true),
 					},
 					{
 						Name:       "foo5-parent",
@@ -677,19 +660,19 @@ var _ = Describe("Eventhandler", func() {
 
 	Describe("Funcs", func() {
 		failingFuncs := handler.Funcs{
-			CreateFunc: func(context.Context, event.CreateEvent, workqueue.RateLimitingInterface) {
+			CreateFunc: func(context.Context, event.CreateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Fail("Did not expect CreateEvent to be called.")
 			},
-			DeleteFunc: func(context.Context, event.DeleteEvent, workqueue.RateLimitingInterface) {
+			DeleteFunc: func(context.Context, event.DeleteEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Fail("Did not expect DeleteEvent to be called.")
 			},
-			UpdateFunc: func(context.Context, event.UpdateEvent, workqueue.RateLimitingInterface) {
+			UpdateFunc: func(context.Context, event.UpdateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Fail("Did not expect UpdateEvent to be called.")
 			},
-			GenericFunc: func(context.Context, event.GenericEvent, workqueue.RateLimitingInterface) {
+			GenericFunc: func(context.Context, event.GenericEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Fail("Did not expect GenericEvent to be called.")
 			},
@@ -700,7 +683,7 @@ var _ = Describe("Eventhandler", func() {
 			evt := event.CreateEvent{
 				Object: pod,
 			}
-			instance.CreateFunc = func(ctx context.Context, evt2 event.CreateEvent, q2 workqueue.RateLimitingInterface) {
+			instance.CreateFunc = func(ctx context.Context, evt2 event.CreateEvent, q2 workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Expect(q2).To(Equal(q))
 				Expect(evt2).To(Equal(evt))
@@ -727,7 +710,7 @@ var _ = Describe("Eventhandler", func() {
 			}
 
 			instance := failingFuncs
-			instance.UpdateFunc = func(ctx context.Context, evt2 event.UpdateEvent, q2 workqueue.RateLimitingInterface) {
+			instance.UpdateFunc = func(ctx context.Context, evt2 event.UpdateEvent, q2 workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Expect(q2).To(Equal(q))
 				Expect(evt2).To(Equal(evt))
@@ -752,7 +735,7 @@ var _ = Describe("Eventhandler", func() {
 			evt := event.DeleteEvent{
 				Object: pod,
 			}
-			instance.DeleteFunc = func(ctx context.Context, evt2 event.DeleteEvent, q2 workqueue.RateLimitingInterface) {
+			instance.DeleteFunc = func(ctx context.Context, evt2 event.DeleteEvent, q2 workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Expect(q2).To(Equal(q))
 				Expect(evt2).To(Equal(evt))
@@ -774,7 +757,7 @@ var _ = Describe("Eventhandler", func() {
 			evt := event.GenericEvent{
 				Object: pod,
 			}
-			instance.GenericFunc = func(ctx context.Context, evt2 event.GenericEvent, q2 workqueue.RateLimitingInterface) {
+			instance.GenericFunc = func(ctx context.Context, evt2 event.GenericEvent, q2 workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				defer GinkgoRecover()
 				Expect(q2).To(Equal(q))
 				Expect(evt2).To(Equal(evt))
@@ -791,4 +774,140 @@ var _ = Describe("Eventhandler", func() {
 			instance.Generic(ctx, evt, q)
 		})
 	})
+
+	Describe("WithLowPriorityWhenUnchanged", func() {
+		It("should lower the priority of a create request for an object that was created more than one minute in the past", func() {
+			actualOpts := priorityqueue.AddOpts{}
+			var actualRequests []reconcile.Request
+			wq := &fakePriorityQueue{
+				addWithOpts: func(o priorityqueue.AddOpts, items ...reconcile.Request) {
+					actualOpts = o
+					actualRequests = items
+				},
+			}
+
+			h := handler.WithLowPriorityWhenUnchanged(&handler.EnqueueRequestForObject{})
+			h.Create(ctx, event.CreateEvent{
+				Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+			}, wq)
+
+			Expect(actualOpts).To(Equal(priorityqueue.AddOpts{Priority: handler.LowPriority}))
+			Expect(actualRequests).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Name: "my-pod"}}}))
+		})
+
+		It("should not lower the priority of a create request for an object that was created less than one minute in the past", func() {
+			actualOpts := priorityqueue.AddOpts{}
+			var actualRequests []reconcile.Request
+			wq := &fakePriorityQueue{
+				addWithOpts: func(o priorityqueue.AddOpts, items ...reconcile.Request) {
+					actualOpts = o
+					actualRequests = items
+				},
+			}
+
+			h := handler.WithLowPriorityWhenUnchanged(&handler.EnqueueRequestForObject{})
+			h.Create(ctx, event.CreateEvent{
+				Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name:              "my-pod",
+					CreationTimestamp: metav1.Now(),
+				}},
+			}, wq)
+
+			Expect(actualOpts).To(Equal(priorityqueue.AddOpts{}))
+			Expect(actualRequests).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Name: "my-pod"}}}))
+		})
+
+		It("should lower the priority of an update request with unchanged RV", func() {
+			actualOpts := priorityqueue.AddOpts{}
+			var actualRequests []reconcile.Request
+			wq := &fakePriorityQueue{
+				addWithOpts: func(o priorityqueue.AddOpts, items ...reconcile.Request) {
+					actualOpts = o
+					actualRequests = items
+				},
+			}
+
+			h := handler.WithLowPriorityWhenUnchanged(&handler.EnqueueRequestForObject{})
+			h.Update(ctx, event.UpdateEvent{
+				ObjectOld: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+				ObjectNew: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+			}, wq)
+
+			Expect(actualOpts).To(Equal(priorityqueue.AddOpts{Priority: handler.LowPriority}))
+			Expect(actualRequests).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Name: "my-pod"}}}))
+		})
+
+		It("should not lower the priority of an update request with changed RV", func() {
+			actualOpts := priorityqueue.AddOpts{}
+			var actualRequests []reconcile.Request
+			wq := &fakePriorityQueue{
+				addWithOpts: func(o priorityqueue.AddOpts, items ...reconcile.Request) {
+					actualOpts = o
+					actualRequests = items
+				},
+			}
+
+			h := handler.WithLowPriorityWhenUnchanged(&handler.EnqueueRequestForObject{})
+			h.Update(ctx, event.UpdateEvent{
+				ObjectOld: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+				ObjectNew: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name:            "my-pod",
+					ResourceVersion: "1",
+				}},
+			}, wq)
+
+			Expect(actualOpts).To(Equal(priorityqueue.AddOpts{}))
+			Expect(actualRequests).To(Equal([]reconcile.Request{{NamespacedName: types.NamespacedName{Name: "my-pod"}}}))
+		})
+
+		It("should have no effect on create if the workqueue is not a priorityqueue", func() {
+			h := handler.WithLowPriorityWhenUnchanged(&handler.EnqueueRequestForObject{})
+			h.Create(ctx, event.CreateEvent{
+				Object: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+			}, q)
+
+			Expect(q.Len()).To(Equal(1))
+			item, _ := q.Get()
+			Expect(item).To(Equal(reconcile.Request{NamespacedName: types.NamespacedName{Name: "my-pod"}}))
+		})
+
+		It("should have no effect on Update if the workqueue is not a priorityqueue", func() {
+			h := handler.WithLowPriorityWhenUnchanged(&handler.EnqueueRequestForObject{})
+			h.Update(ctx, event.UpdateEvent{
+				ObjectOld: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+				ObjectNew: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "my-pod",
+				}},
+			}, q)
+
+			Expect(q.Len()).To(Equal(1))
+			item, _ := q.Get()
+			Expect(item).To(Equal(reconcile.Request{NamespacedName: types.NamespacedName{Name: "my-pod"}}))
+		})
+	})
+
 })
+
+type fakePriorityQueue struct {
+	workqueue.TypedRateLimitingInterface[reconcile.Request]
+	addWithOpts func(o priorityqueue.AddOpts, items ...reconcile.Request)
+}
+
+func (f *fakePriorityQueue) AddWithOpts(o priorityqueue.AddOpts, items ...reconcile.Request) {
+	f.addWithOpts(o, items...)
+}
+func (f *fakePriorityQueue) GetWithPriority() (item reconcile.Request, priority int, shutdown bool) {
+	panic("GetWithPriority is not expected to be called")
+}

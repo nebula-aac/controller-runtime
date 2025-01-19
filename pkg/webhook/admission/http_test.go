@@ -19,6 +19,7 @@ package admission
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,6 +80,32 @@ var _ = Describe("Admission Webhooks", func() {
 
 			expected :=
 				`{"response":{"uid":"","allowed":false,"status":{"metadata":{},"message":"couldn't get version/kind; json parse error: unexpected end of JSON input","code":400}}}
+`
+			webhook.ServeHTTP(respRecorder, req)
+			Expect(respRecorder.Body.String()).To(Equal(expected))
+		})
+
+		It("should error when given a NoBody", func() {
+			req := &http.Request{
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Method: http.MethodPost,
+				Body:   http.NoBody,
+			}
+
+			expected := `{"response":{"uid":"","allowed":false,"status":{"metadata":{},"message":"request body is empty","code":400}}}
+`
+			webhook.ServeHTTP(respRecorder, req)
+			Expect(respRecorder.Body.String()).To(Equal(expected))
+		})
+
+		It("should error when given an infinite body", func() {
+			req := &http.Request{
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Method: http.MethodPost,
+				Body:   nopCloser{Reader: rand.Reader},
+			}
+
+			expected := `{"response":{"uid":"","allowed":false,"status":{"metadata":{},"message":"request entity is too large; limit is 7340032 bytes","code":413}}}
 `
 			webhook.ServeHTTP(respRecorder, req)
 			Expect(respRecorder.Body.String()).To(Equal(expected))

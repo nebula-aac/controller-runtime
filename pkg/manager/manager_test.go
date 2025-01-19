@@ -18,7 +18,6 @@ package manager
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,17 +37,14 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	configv1alpha1 "k8s.io/component-base/config/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
-	"sigs.k8s.io/controller-runtime/pkg/config/v1alpha1"
 	intrec "sigs.k8s.io/controller-runtime/pkg/internal/recorder"
 	"sigs.k8s.io/controller-runtime/pkg/leaderelection"
 	fakeleaderelection "sigs.k8s.io/controller-runtime/pkg/leaderelection/fake"
@@ -118,143 +115,6 @@ var _ = Describe("manger.Manager", func() {
 			Expect(m).To(BeNil())
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("expected error"))
-		})
-
-		It("should be able to load Options from cfg.ControllerManagerConfiguration type", func() {
-			duration := metav1.Duration{Duration: 48 * time.Hour}
-			port := int(6090)
-			leaderElect := false
-
-			ccfg := &v1alpha1.ControllerManagerConfiguration{
-				ControllerManagerConfigurationSpec: v1alpha1.ControllerManagerConfigurationSpec{
-					SyncPeriod: &duration,
-					LeaderElection: &configv1alpha1.LeaderElectionConfiguration{
-						LeaderElect:       &leaderElect,
-						ResourceLock:      "leases",
-						ResourceNamespace: "default",
-						ResourceName:      "ctrl-lease",
-						LeaseDuration:     duration,
-						RenewDeadline:     duration,
-						RetryPeriod:       duration,
-					},
-					CacheNamespace: "default",
-					Metrics: v1alpha1.ControllerMetrics{
-						BindAddress: ":6000",
-					},
-					Health: v1alpha1.ControllerHealth{
-						HealthProbeBindAddress: "6060",
-						ReadinessEndpointName:  "/readyz",
-						LivenessEndpointName:   "/livez",
-					},
-					Webhook: v1alpha1.ControllerWebhook{
-						Port:    &port,
-						Host:    "localhost",
-						CertDir: "/certs",
-					},
-				},
-			}
-
-			m, err := Options{}.AndFrom(&fakeDeferredLoader{ccfg})
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(*m.Cache.SyncPeriod).To(Equal(duration.Duration))
-			Expect(m.LeaderElection).To(Equal(leaderElect))
-			Expect(m.LeaderElectionResourceLock).To(Equal("leases"))
-			Expect(m.LeaderElectionNamespace).To(Equal("default"))
-			Expect(m.LeaderElectionID).To(Equal("ctrl-lease"))
-			Expect(m.LeaseDuration.String()).To(Equal(duration.Duration.String()))
-			Expect(m.RenewDeadline.String()).To(Equal(duration.Duration.String()))
-			Expect(m.RetryPeriod.String()).To(Equal(duration.Duration.String()))
-			Expect(m.Cache.DefaultNamespaces).To(Equal(map[string]cache.Config{"default": {}}))
-			Expect(m.Metrics.BindAddress).To(Equal(":6000"))
-			Expect(m.HealthProbeBindAddress).To(Equal("6060"))
-			Expect(m.ReadinessEndpointName).To(Equal("/readyz"))
-			Expect(m.LivenessEndpointName).To(Equal("/livez"))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.Port).To(Equal(port))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.Host).To(Equal("localhost"))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.CertDir).To(Equal("/certs"))
-		})
-
-		It("should be able to keep Options when cfg.ControllerManagerConfiguration set", func() {
-			optDuration := time.Duration(2)
-			duration := metav1.Duration{Duration: 48 * time.Hour}
-			port := int(6090)
-			leaderElect := false
-
-			ccfg := &v1alpha1.ControllerManagerConfiguration{
-				ControllerManagerConfigurationSpec: v1alpha1.ControllerManagerConfigurationSpec{
-					SyncPeriod: &duration,
-					LeaderElection: &configv1alpha1.LeaderElectionConfiguration{
-						LeaderElect:       &leaderElect,
-						ResourceLock:      "leases",
-						ResourceNamespace: "default",
-						ResourceName:      "ctrl-lease",
-						LeaseDuration:     duration,
-						RenewDeadline:     duration,
-						RetryPeriod:       duration,
-					},
-					CacheNamespace: "default",
-					Metrics: v1alpha1.ControllerMetrics{
-						BindAddress: ":6000",
-					},
-					Health: v1alpha1.ControllerHealth{
-						HealthProbeBindAddress: "6060",
-						ReadinessEndpointName:  "/readyz",
-						LivenessEndpointName:   "/livez",
-					},
-					Webhook: v1alpha1.ControllerWebhook{
-						Port:    &port,
-						Host:    "localhost",
-						CertDir: "/certs",
-					},
-				},
-			}
-
-			optionsTlSOptsFuncs := []func(*tls.Config){
-				func(config *tls.Config) {},
-			}
-			m, err := Options{
-				Cache: cache.Options{
-					SyncPeriod:        &optDuration,
-					DefaultNamespaces: map[string]cache.Config{"ctrl": {}},
-				},
-				LeaderElection:             true,
-				LeaderElectionResourceLock: "configmaps",
-				LeaderElectionNamespace:    "ctrl",
-				LeaderElectionID:           "ctrl-configmap",
-				LeaseDuration:              &optDuration,
-				RenewDeadline:              &optDuration,
-				RetryPeriod:                &optDuration,
-				Metrics:                    metricsserver.Options{BindAddress: ":7000"},
-				HealthProbeBindAddress:     "5000",
-				ReadinessEndpointName:      "/readiness",
-				LivenessEndpointName:       "/liveness",
-				WebhookServer: webhook.NewServer(webhook.Options{
-					Port:    8080,
-					Host:    "example.com",
-					CertDir: "/pki",
-					TLSOpts: optionsTlSOptsFuncs,
-				}),
-			}.AndFrom(&fakeDeferredLoader{ccfg})
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(m.Cache.SyncPeriod.String()).To(Equal(optDuration.String()))
-			Expect(m.LeaderElection).To(BeTrue())
-			Expect(m.LeaderElectionResourceLock).To(Equal("configmaps"))
-			Expect(m.LeaderElectionNamespace).To(Equal("ctrl"))
-			Expect(m.LeaderElectionID).To(Equal("ctrl-configmap"))
-			Expect(m.LeaseDuration.String()).To(Equal(optDuration.String()))
-			Expect(m.RenewDeadline.String()).To(Equal(optDuration.String()))
-			Expect(m.RetryPeriod.String()).To(Equal(optDuration.String()))
-			Expect(m.Cache.DefaultNamespaces).To(Equal(map[string]cache.Config{"ctrl": {}}))
-			Expect(m.Metrics.BindAddress).To(Equal(":7000"))
-			Expect(m.HealthProbeBindAddress).To(Equal("5000"))
-			Expect(m.ReadinessEndpointName).To(Equal("/readiness"))
-			Expect(m.LivenessEndpointName).To(Equal("/liveness"))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.Port).To(Equal(8080))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.Host).To(Equal("example.com"))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.CertDir).To(Equal("/pki"))
-			Expect(m.WebhookServer.(*webhook.DefaultServer).Options.TLSOpts).To(Equal(optionsTlSOptsFuncs))
 		})
 
 		It("should lazily initialize a webhook server if needed", func() {
@@ -378,6 +238,107 @@ var _ = Describe("manger.Manager", func() {
 
 				Expect(cm.gracefulShutdownTimeout.Nanoseconds()).To(Equal(int64(0)))
 			})
+
+			It("should prevent leader election when shutting down a non-elected manager", func() {
+				var rl resourcelock.Interface
+				m1, err := New(cfg, Options{
+					LeaderElection:          true,
+					LeaderElectionNamespace: "default",
+					LeaderElectionID:        "test-leader-election-id",
+					newResourceLock: func(config *rest.Config, recorderProvider recorder.Provider, options leaderelection.Options) (resourcelock.Interface, error) {
+						var err error
+						rl, err = leaderelection.NewResourceLock(config, recorderProvider, options)
+						return rl, err
+					},
+					HealthProbeBindAddress: "0",
+					Metrics:                metricsserver.Options{BindAddress: "0"},
+					PprofBindAddress:       "0",
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(m1).ToNot(BeNil())
+				Expect(rl.Describe()).To(Equal("default/test-leader-election-id"))
+
+				m1cm, ok := m1.(*controllerManager)
+				Expect(ok).To(BeTrue())
+				m1cm.onStoppedLeading = func() {}
+
+				m2, err := New(cfg, Options{
+					LeaderElection:          true,
+					LeaderElectionNamespace: "default",
+					LeaderElectionID:        "test-leader-election-id",
+					newResourceLock: func(config *rest.Config, recorderProvider recorder.Provider, options leaderelection.Options) (resourcelock.Interface, error) {
+						var err error
+						rl, err = leaderelection.NewResourceLock(config, recorderProvider, options)
+						return rl, err
+					},
+					HealthProbeBindAddress: "0",
+					Metrics:                metricsserver.Options{BindAddress: "0"},
+					PprofBindAddress:       "0",
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(m2).ToNot(BeNil())
+				Expect(rl.Describe()).To(Equal("default/test-leader-election-id"))
+
+				m1done := make(chan struct{})
+				Expect(m1.Add(RunnableFunc(func(ctx context.Context) error {
+					defer GinkgoRecover()
+					close(m1done)
+					return nil
+				}))).To(Succeed())
+
+				ctx1, cancel1 := context.WithCancel(context.Background())
+				defer cancel1()
+				go func() {
+					defer GinkgoRecover()
+					Expect(m1.Elected()).ShouldNot(BeClosed())
+					Expect(m1.Start(ctx1)).NotTo(HaveOccurred())
+				}()
+				<-m1.Elected()
+				<-m1done
+
+				electionRunnable := &needElection{make(chan struct{})}
+
+				Expect(m2.Add(electionRunnable)).To(Succeed())
+
+				ctx2, cancel2 := context.WithCancel(context.Background())
+				m2done := make(chan struct{})
+				go func() {
+					defer GinkgoRecover()
+					Expect(m2.Start(ctx2)).NotTo(HaveOccurred())
+					close(m2done)
+				}()
+				Consistently(m2.Elected()).ShouldNot(Receive())
+
+				go func() {
+					defer GinkgoRecover()
+					Consistently(electionRunnable.ch).ShouldNot(Receive())
+				}()
+				cancel2()
+				<-m2done
+			})
+
+			It("should default RenewDeadline for leader election config", func() {
+				var rl resourcelock.Interface
+				m1, err := New(cfg, Options{
+					LeaderElection:          true,
+					LeaderElectionNamespace: "default",
+					LeaderElectionID:        "test-leader-election-id",
+					newResourceLock: func(config *rest.Config, recorderProvider recorder.Provider, options leaderelection.Options) (resourcelock.Interface, error) {
+						if options.RenewDeadline != 10*time.Second {
+							return nil, fmt.Errorf("expected RenewDeadline to be 10s, got %v", options.RenewDeadline)
+						}
+						var err error
+						rl, err = leaderelection.NewResourceLock(config, recorderProvider, options)
+						return rl, err
+					},
+					HealthProbeBindAddress: "0",
+					Metrics:                metricsserver.Options{BindAddress: "0"},
+					PprofBindAddress:       "0",
+				})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(m1).ToNot(BeNil())
+			})
+
 			It("should default ID to controller-runtime if ID is not set", func() {
 				var rl resourcelock.Interface
 				m1, err := New(cfg, Options{
@@ -611,7 +572,7 @@ var _ = Describe("manger.Manager", func() {
 		})
 
 		It("should return an error if the metrics bind address is already in use", func() {
-			ln, err := net.Listen("tcp", ":0") //nolint:gosec
+			ln, err := net.Listen("tcp", ":0")
 			Expect(err).ShouldNot(HaveOccurred())
 
 			var srv metricsserver.Server
@@ -636,7 +597,7 @@ var _ = Describe("manger.Manager", func() {
 		})
 
 		It("should return an error if the metrics bind address is already in use and secure serving enabled", func() {
-			ln, err := net.Listen("tcp", ":0") //nolint:gosec
+			ln, err := net.Listen("tcp", ":0")
 			Expect(err).ShouldNot(HaveOccurred())
 
 			var srv metricsserver.Server
@@ -1044,6 +1005,57 @@ var _ = Describe("manger.Manager", func() {
 				}))).NotTo(Succeed())
 			})
 
+			It("should not return runnables context.Canceled errors", func() {
+				Expect(options.Logger).To(BeZero(), "this test overrides Logger")
+
+				var log struct {
+					sync.Mutex
+					messages []string
+				}
+				options.Logger = funcr.NewJSON(func(object string) {
+					log.Lock()
+					log.messages = append(log.messages, object)
+					log.Unlock()
+				}, funcr.Options{})
+
+				m, err := New(cfg, options)
+				Expect(err).NotTo(HaveOccurred())
+				for _, cb := range callbacks {
+					cb(m)
+				}
+
+				// Runnables may return ctx.Err() as shown in some [context.Context] examples.
+				started := make(chan struct{})
+				Expect(m.Add(RunnableFunc(func(ctx context.Context) error {
+					close(started)
+					<-ctx.Done()
+					return ctx.Err()
+				}))).To(Succeed())
+
+				stopped := make(chan error)
+				ctx, cancel := context.WithCancel(context.Background())
+				go func() {
+					stopped <- m.Start(ctx)
+				}()
+
+				// Wait for runnables to start, signal the manager, and wait for it to return.
+				<-started
+				cancel()
+				Expect(<-stopped).To(Succeed())
+
+				// The leader election goroutine emits one more log message after Start() returns.
+				// Take the lock here to avoid a race between it writing to log.messages and the
+				// following read from log.messages.
+				if options.LeaderElection {
+					log.Lock()
+					defer log.Unlock()
+				}
+
+				Expect(log.messages).To(Not(ContainElement(
+					ContainSubstring(context.Canceled.Error()),
+				)))
+			})
+
 			It("should return both runnables and stop errors when both error", func() {
 				m, err := New(cfg, options)
 				Expect(err).NotTo(HaveOccurred())
@@ -1227,6 +1239,23 @@ var _ = Describe("manger.Manager", func() {
 					cm.onStoppedLeading = func() {}
 				},
 			)
+
+			It("should return an error if leader election param incorrect", func() {
+				renewDeadline := time.Second * 20
+				m, err := New(cfg, Options{
+					LeaderElection:          true,
+					LeaderElectionID:        "controller-runtime",
+					LeaderElectionNamespace: "default",
+					newResourceLock:         fakeleaderelection.NewResourceLock,
+					RenewDeadline:           &renewDeadline,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+				defer cancel()
+				err = m.Start(ctx)
+				Expect(err).To(HaveOccurred())
+				Expect(errors.Is(err, context.DeadlineExceeded)).NotTo(BeTrue())
+			})
 		})
 
 		Context("should start serving metrics", func() {
@@ -1373,6 +1402,12 @@ var _ = Describe("manger.Manager", func() {
 				}
 				m, err := New(cfg, opts)
 				Expect(err).NotTo(HaveOccurred())
+
+				// Should error when we add another extra endpoint on the already registered path.
+				err = m.AddMetricsServerExtraHandler("/debug", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					_, _ = w.Write([]byte("Another debug info"))
+				}))
+				Expect(err).To(HaveOccurred())
 
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -1911,21 +1946,22 @@ func (c *startClusterAfterManager) GetCache() cache.Cache {
 	return c.informer
 }
 
-type fakeDeferredLoader struct {
-	*v1alpha1.ControllerManagerConfiguration
-}
-
-func (f *fakeDeferredLoader) Complete() (v1alpha1.ControllerManagerConfigurationSpec, error) {
-	return f.ControllerManagerConfiguration.ControllerManagerConfigurationSpec, nil
-}
-
-func (f *fakeDeferredLoader) InjectScheme(scheme *runtime.Scheme) error {
-	return nil
-}
-
 // metricsDefaultServer is used to type check the default metrics server implementation
 // so we can retrieve the bind addr without having to make GetBindAddr a function on the
 // metricsserver.Server interface or resort to reflection.
 type metricsDefaultServer interface {
 	GetBindAddr() string
+}
+
+type needElection struct {
+	ch chan struct{}
+}
+
+func (n *needElection) Start(_ context.Context) error {
+	n.ch <- struct{}{}
+	return nil
+}
+
+func (n *needElection) NeedLeaderElection() bool {
+	return true
 }

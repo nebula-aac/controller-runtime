@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -41,7 +42,7 @@ var _ = BeforeSuite(func() {
 })
 
 var _ = AfterSuite(func() {
-	for _, file := range []string{certPath, keyPath} {
+	for _, file := range []string{certPath, keyPath, certPath + ".new", keyPath + ".new", certPath + ".old", keyPath + ".old"} {
 		_ = os.Remove(file)
 	}
 })
