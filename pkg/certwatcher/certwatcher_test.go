@@ -24,7 +24,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -201,54 +200,18 @@ var _ = Describe("CertWatcher", func() {
 			})
 
 			It("should get updated on successful certificate read", func() {
-				// This test verifies fsnotify, so interval doesn't matter.
-				doneCh := startWatcher(10 * time.Second)
+				Expect(watcher.ReadCertificate()).To(Succeed())
 
-				Eventually(func() error {
-					readCertificateTotalAfter := testutil.ToFloat64(metrics.ReadCertificateTotal)
-					if readCertificateTotalAfter < readCertificateTotalBefore+1.0 {
-						return fmt.Errorf("metric read certificate total expected at least: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
-					}
-					return nil
-				}, "4s").Should(Succeed())
-
-				ctxCancel()
-				Eventually(doneCh, "4s").Should(BeClosed())
+				Expect(testutil.ToFloat64(metrics.ReadCertificateTotal)).To(Equal(readCertificateTotalBefore + 1))
 			})
 
 			It("should get updated on read certificate errors", func() {
-				// This test works with fsnotify, so interval doesn't matter.
-				doneCh := startWatcher(10 * time.Second)
-
-				Eventually(func() error {
-					readCertificateTotalAfter := testutil.ToFloat64(metrics.ReadCertificateTotal)
-					if readCertificateTotalAfter < readCertificateTotalBefore+1.0 {
-						return fmt.Errorf("metric read certificate total expected at least: %v and got: %v", readCertificateTotalBefore+1.0, readCertificateTotalAfter)
-					}
-					readCertificateTotalBefore = readCertificateTotalAfter
-					return nil
-				}, "4s").Should(Succeed())
-
 				Expect(os.Remove(keyPath)).To(Succeed())
 
-				// Note, we are checking two errors here, because os.Remove generates two fsnotify events: Chmod + Remove
-				Eventually(func() error {
-					readCertificateTotalAfter := testutil.ToFloat64(metrics.ReadCertificateTotal)
-					if readCertificateTotalAfter < readCertificateTotalBefore+2.0 {
-						return fmt.Errorf("metric read certificate total expected at least: %v and got: %v", readCertificateTotalBefore+2.0, readCertificateTotalAfter)
-					}
-					return nil
-				}, "4s").Should(Succeed())
-				Eventually(func() error {
-					readCertificateErrorsAfter := testutil.ToFloat64(metrics.ReadCertificateErrors)
-					if readCertificateErrorsAfter < readCertificateErrorsBefore+2.0 {
-						return fmt.Errorf("metric read certificate errors expected at least: %v and got: %v", readCertificateErrorsBefore+2.0, readCertificateErrorsAfter)
-					}
-					return nil
-				}, "4s").Should(Succeed())
+				Expect(watcher.ReadCertificate()).To(HaveOccurred())
 
-				ctxCancel()
-				Eventually(doneCh, "4s").Should(BeClosed())
+				Expect(testutil.ToFloat64(metrics.ReadCertificateTotal)).To(Equal(readCertificateTotalBefore + 1))
+				Expect(testutil.ToFloat64(metrics.ReadCertificateErrors)).To(Equal(readCertificateErrorsBefore + 1))
 			})
 		})
 	})
