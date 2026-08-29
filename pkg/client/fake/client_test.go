@@ -1636,6 +1636,49 @@ var _ = Describe("Fake client", func() {
 		Expect(retrieved).To(Equal(reference))
 	})
 
+	It("should use a per-object ResourceVersion counter by default", func(ctx SpecContext) {
+		cl := NewClientBuilder().
+			WithObjects(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "ns1"}}).
+			Build()
+
+		By("Getting the deployment that was added to the tracker")
+		obj := &appsv1.Deployment{}
+		Expect(cl.Get(ctx, types.NamespacedName{Name: "test-deployment", Namespace: "ns1"}, obj)).To(Succeed())
+		Expect(obj.ResourceVersion).To(Equal(trackerAddResourceVersion))
+
+		By("Creating a configMap")
+		newCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns2"}}
+		Expect(cl.Create(ctx, newCM)).To(Succeed())
+		Expect(newCM.ResourceVersion).To(Equal("1"))
+
+		By("Updating the deployment")
+		obj.Labels = map[string]string{"test-label": "label-value"}
+		Expect(cl.Update(ctx, obj)).To(Succeed())
+		Expect(obj.ResourceVersion).To(Equal("1000"))
+	})
+
+	It("should use a single global ResourceVersion counter when WithGlobalResourceVersionCounter is used", func(ctx SpecContext) {
+		cl := NewClientBuilder().
+			WithGlobalResourceVersionCounter().
+			WithObjects(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "ns1"}}).
+			Build()
+
+		By("Getting the deployment that was added to the tracker")
+		obj := &appsv1.Deployment{}
+		Expect(cl.Get(ctx, types.NamespacedName{Name: "test-deployment", Namespace: "ns1"}, obj)).To(Succeed())
+		Expect(obj.ResourceVersion).To(Equal("1"))
+
+		By("Creating a configMap")
+		newCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: "ns2"}}
+		Expect(cl.Create(ctx, newCM)).To(Succeed())
+		Expect(newCM.ResourceVersion).To(Equal("2"))
+
+		By("Updating the deployment")
+		obj.Labels = map[string]string{"test-label": "label-value"}
+		Expect(cl.Update(ctx, obj)).To(Succeed())
+		Expect(obj.ResourceVersion).To(Equal("3"))
+	})
+
 	It("should be able to build with given tracker and get resource", func(ctx SpecContext) {
 		clientSet := fake.NewClientset(dep)
 		cl := NewClientBuilder().WithRuntimeObjects(dep2).WithObjectTracker(clientSet.Tracker()).Build()
