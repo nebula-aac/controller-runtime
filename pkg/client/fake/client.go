@@ -1746,12 +1746,13 @@ func applyScale(obj client.Object, scale *autoscalingv1.Scale) error {
 	return nil
 }
 
-// AddIndex adds an index to a fake client. It will panic if used with a client that is not a fake client.
+// AddIndex adds an index to a fake client. It will panic if used with a client that is not a fake client,
+// or a wrapper around one, such as the client returned by ClientBuilder.WithInterceptorFuncs.
 // It will error if there is already an index for given object with the same name as field.
 //
 // It can be used to test code that adds indexes to the cache at runtime.
 func AddIndex(c client.Client, obj runtime.Object, field string, extractValue client.IndexerFunc) error {
-	fakeClient, isFakeClient := c.(*fakeClient)
+	fakeClient, isFakeClient := unwrapFakeClient(c)
 	if !isFakeClient {
 		panic("AddIndex can only be used with a fake client")
 	}
@@ -1778,6 +1779,21 @@ func AddIndex(c client.Client, obj runtime.Object, field string, extractValue cl
 	fakeClient.indexes[gvk][field] = extractValue
 
 	return nil
+}
+
+// unwrapFakeClient returns the *fakeClient backing c, unwrapping any clients that wrap it, such as the
+// interceptor client returned by ClientBuilder.WithInterceptorFuncs.
+func unwrapFakeClient(c client.Client) (*fakeClient, bool) {
+	for {
+		if fc, ok := c.(*fakeClient); ok {
+			return fc, true
+		}
+		unwrapper, ok := c.(interface{ Unwrap() client.WithWatch })
+		if !ok {
+			return nil, false
+		}
+		c = unwrapper.Unwrap()
+	}
 }
 
 func (c *fakeClient) addToSchemeIfUnknownAndUnstructuredOrPartial(obj runtime.Object) error {

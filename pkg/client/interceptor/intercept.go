@@ -60,6 +60,13 @@ type interceptor struct {
 
 var _ client.WithWatch = &interceptor{}
 
+// Unwrap returns the client that is wrapped by this interceptor. This is used by consumers that need to
+// access functionality of the wrapped client that is not part of the client.WithWatch interface, such as
+// sigs.k8s.io/controller-runtime/pkg/client/fake.AddIndex.
+func (c interceptor) Unwrap() client.WithWatch {
+	return c.client
+}
+
 func (c interceptor) GroupVersionKindFor(obj runtime.Object) (schema.GroupVersionKind, error) {
 	return c.client.GroupVersionKindFor(obj)
 }
