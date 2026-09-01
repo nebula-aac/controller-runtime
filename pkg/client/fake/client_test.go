@@ -3858,6 +3858,15 @@ var _ = Describe("Fake client builder", func() {
 		Expect(called).To(BeTrue())
 	})
 
+	It("supports AddIndex when the client is wrapped with an interceptor", func(ctx SpecContext) {
+		cli := NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{}).Build()
+
+		err := AddIndex(cli, &appsv1.Deployment{}, "metadata.name", func(obj client.Object) []string {
+			return []string{obj.GetName()}
+		})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("should panic when calling build more than once", func() {
 		cb := NewClientBuilder()
 		anotherCb := cb
