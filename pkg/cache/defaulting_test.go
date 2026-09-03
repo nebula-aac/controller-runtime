@@ -17,14 +17,18 @@ limitations under the License.
 package cache
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	fuzz "github.com/google/gofuzz"
+	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
@@ -516,4 +520,127 @@ func TestDefaultConfigConsidersAllFields(t *testing.T) {
 			t.Errorf("Defaulted config doesn't match fuzzed one: %s", diff)
 		}
 	}
+}
+
+// mockCache is a mock implementation of Cache for testing Start() behavior.
+type mockCache struct {
+	startFunc func(ctx context.Context) error
+	Cache
+}
+
+func (m *mockCache) Start(ctx context.Context) error {
+	if m.startFunc != nil {
+		return m.startFunc(ctx)
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func TestMultiNamespaceCacheStart_MultipleErrors(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		g := NewWithT(t)
+
+		errTest := errors.New("test error")
+		namespaceToCache := map[string]Cache{
+			"ns1": &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+			"ns2": &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+			"ns3": &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+		}
+
+		c := &multiNamespaceCache{
+			namespaceToCache: namespaceToCache,
+		}
+
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+
+		err := c.Start(ctx)
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError(errTest))
+	})
+}
+
+func TestMultiNamespaceCacheStart_ContextCancel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		g := NewWithT(t)
+
+		normalCache := &mockCache{
+			startFunc: func(ctx context.Context) error {
+				<-ctx.Done()
+				return nil
+			},
+		}
+
+		namespaceToCache := map[string]Cache{
+			"ns1": normalCache,
+			"ns2": normalCache,
+		}
+
+		c := &multiNamespaceCache{
+			namespaceToCache: namespaceToCache,
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel immediately
+
+		err := c.Start(ctx)
+		g.Expect(err).NotTo(HaveOccurred())
+	})
+}
+
+func TestDelegatingByGVKCacheStart_MultipleErrors(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		g := NewWithT(t)
+
+		errTest := errors.New("test error")
+		caches := map[schema.GroupVersionKind]Cache{
+			{Group: "apps", Version: "v1", Kind: "Deployment"}:  &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+			{Group: "apps", Version: "v1", Kind: "StatefulSet"}: &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+			{Group: "apps", Version: "v1", Kind: "DaemonSet"}:   &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+		}
+
+		c := &delegatingByGVKCache{
+			caches:       caches,
+			defaultCache: &mockCache{startFunc: func(ctx context.Context) error { return errTest }},
+		}
+
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+
+		err := c.Start(ctx)
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError(errTest))
+	})
+}
+
+func TestDelegatingByGVKCacheStart_ContextCancel(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		g := NewWithT(t)
+
+		normalCache := &mockCache{
+			startFunc: func(ctx context.Context) error {
+				<-ctx.Done()
+				return nil
+			},
+		}
+
+		caches := map[schema.GroupVersionKind]Cache{
+			{Group: "apps", Version: "v1", Kind: "Deployment"}: normalCache,
+		}
+
+		c := &delegatingByGVKCache{
+			caches:       caches,
+			defaultCache: normalCache,
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // Cancel immediately
+
+		err := c.Start(ctx)
+		g.Expect(err).NotTo(HaveOccurred())
+	})
 }
